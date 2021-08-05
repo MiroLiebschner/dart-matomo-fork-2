@@ -4,16 +4,16 @@ import 'dart:convert';
 import 'dart:math';
 import 'dart:ui';
 
+import 'package:fk_user_agent/fk_user_agent.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:fk_user_agent/fk_user_agent.dart';
 import 'package:http/http.dart' as http;
 import 'package:logging/logging.dart';
 import 'package:matomo/random_alpha_numeric.dart';
 import 'package:package_info/package_info.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:uuid/uuid.dart';
 import 'package:universal_html/html.dart' as html;
+import 'package:uuid/uuid.dart';
 
 abstract class TraceableStatelessWidget extends StatelessWidget {
   final String name;
@@ -112,7 +112,7 @@ class MatomoTracker {
     required String url,
     String? visitorId,
     String? contentBaseUrl,
-    int dequeueInterval = 10
+    int dequeueInterval = 5
   }) async {
     this.siteId = siteId;
     this.url = url;
@@ -194,6 +194,9 @@ class MatomoTracker {
         'Matomo Initialized: firstVisit=$firstVisit; lastVisit=$lastVisit; visitCount=$visitCount; visitorId=$visitorId; contentBase=$contentBase; resolution=${width}x$height; userAgent=$userAgent');
     this.initialized = true;
 
+    List<_Event> savedEvents = getEventsFromSharedPrefs();
+    if (savedEvents.length > 0){addEventsToQueue(savedEvents);}
+
     _timer = Timer.periodic(Duration(seconds: dequeueInterval), (timer) {
       this._dequeue();
     });
@@ -269,26 +272,40 @@ class MatomoTracker {
     _queue.add(event);
   }
 
-  void _dequeue() {
+  void _dequeue() async  {
     assert(initialized);
     log.finest('Processing queue ${_queue.length}');
     saveQueueInSharedPrefs(_queue);
-    while (_queue.length > 0) {
-      var event = _queue.removeFirst();
+
+    int errorCount = 0;
+    while (_queue.length > 0 && errorCount < 5) {
       if (!_optout!) {
-        _dispatcher.send(event);
+        if (_dispatcher.send(_queue.first)){
+          _queue.removeFirst();
+        } else {errorCount++;}
       }
     }
   }
 
+  //Miro
   List<_Event> getEventsFromSharedPrefs(){
    List<String>? eventsAsString =  _prefs!.getStringList(this.sharedPrefsPath);
+   var tracker = MatomoTracker();
+   List<_Event> listOfEvents = [];
    eventsAsString!.forEach((element) {
      //Create Event from StringL
-     
+      Map<String,dynamic> eventAsMap = json.decode(element);
+      //Create Timestamp
+      //Testing
+      print(eventAsMap);
+      listOfEvents.add(_Event(tracker: tracker, action: eventAsMap["e_a"], eventName: eventAsMap["e_n"], eventCategory:eventAsMap["e_c"] ));
    });
+   return listOfEvents;
+  }
 
-    return listOfEvents ?? [];
+
+  void addEventsToQueue(List<_Event> events){
+    _queue.addAll(events);
   }
 
   void saveQueueInSharedPrefs(Queue<_Event> queue){
@@ -325,19 +342,23 @@ class _Event {
   final int? eventValue;
   final int? goalId;
   final double? revenue;
+  final DateTime? date;
 
   late DateTime _date;
 
+
   _Event(
-      {required this.tracker,
+      {
+
+        required this.tracker,
       this.action,
       this.eventCategory,
       this.eventAction,
       this.eventName,
       this.eventValue,
       this.goalId,
-      this.revenue}) {
-    _date = DateTime.now().toUtc();
+      this.revenue, this.date}) {
+    _date  = this.date ??  DateTime.now().toUtc();
   }
 
   Map<String, dynamic> toMap() {
@@ -413,7 +434,7 @@ class _MatomoDispatcher {
 
   _MatomoDispatcher(this.baseUrl);
 
-  void send(_Event event) {
+  bool send(_Event event) {
     var headers = {
       if (!kIsWeb && event.tracker.userAgent != null)
         'User-Agent': event.tracker.userAgent!,
@@ -426,15 +447,17 @@ class _MatomoDispatcher {
       url = '$url$key=$value&';
     }
     event.tracker.log.fine(' -> $url');
+    bool returnValue = false;
     http.post(Uri.parse(url), headers: headers).then((http.Response response) {
       final int statusCode = response.statusCode;
       event.tracker.log.fine(' <- $statusCode');
-      if (statusCode != 200) {
-        var tracker = MatomoTracker();
-        tracker._track(event);
+      if (statusCode == 200) {
+        returnValue =  true;
       }
     }).catchError((e) {
       event.tracker.log.fine(' <- ${e.toString()}');
+      return false;
     });
+    return returnValue;
   }
 }
