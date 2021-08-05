@@ -100,6 +100,8 @@ class MatomoTracker {
   bool? _optout = false;
 
   bool saveOnDevice = true;
+  bool queueIsRunning = false;
+  int maxSimultaneousRequests = 5;
   String sharedPrefsPath = "savedEventsMatomo";
 
   SharedPreferences? _prefs;
@@ -112,8 +114,10 @@ class MatomoTracker {
     required String url,
     String? visitorId,
     String? contentBaseUrl,
-    int dequeueInterval = 5
+    int dequeueInterval = 5,
+    int? maxSimultaneousRequests
   }) async {
+    this.maxSimultaneousRequests = maxSimultaneousRequests ?? this.maxSimultaneousRequests;
     this.siteId = siteId;
     this.url = url;
 
@@ -198,7 +202,9 @@ class MatomoTracker {
     if (savedEvents.length > 0){addEventsToQueue(savedEvents);}
 
     _timer = Timer.periodic(Duration(seconds: dequeueInterval), (timer) {
-      this._dequeue();
+      if (!queueIsRunning) {
+        this._dequeue();
+      }
     });
   }
 
@@ -272,33 +278,48 @@ class MatomoTracker {
     _queue.add(event);
   }
 
-  void _dequeue() {
-    assert(initialized);
-    log.finest('Processing queue ${_queue.length}');
-    while (_queue.length > 0) {
-      var event = _queue.removeFirst();
-      if (!_optout!) {
-        _dispatcher.send(event);
-      }
+  Future<bool> _dequeueOne(event) async {
+    var httpStatus = await _dispatcher.send(event);
+    if (httpStatus == 200) {
+      _queue.remove(event);
+      return true;
     }
+    return false;
   }
 
-  //Miro
+  void _dequeue() async {
+    queueIsRunning = true;
+    List<_Event> eventQueue = [];
+    List<Future<bool>> dequeueQueue = [];
+
+    if (_queue.length > 0) {
+      for (var i = 0; i < maxSimultaneousRequests && i < _queue.length; i++) {
+        var event = _queue.elementAt(i);
+        eventQueue.add(event);
+      }
+      eventQueue.forEach((currentEvent) {
+        dequeueQueue.add(_dequeueOne(currentEvent));
+      });
+      List<bool> success = await Future.wait(dequeueQueue);
+
+      if (!success.contains(false) && _queue.length > 0) {
+        _dequeue();
+      }
+    }
+    saveQueueInSharedPrefs(_queue);
+    queueIsRunning = false;
+  }
+
   List<_Event> getEventsFromSharedPrefs(){
-   List<String>? eventsAsString =  _prefs!.getStringList(this.sharedPrefsPath);
-   var tracker = MatomoTracker();
+   List<String>? eventsAsString = _prefs!.getStringList(this.sharedPrefsPath) ?? [];
+   var tracker = this;
    List<_Event> listOfEvents = [];
-   eventsAsString!.forEach((element) {
-     //Create Event from StringL
+   eventsAsString.forEach((element) {
       Map<String,dynamic> eventAsMap = json.decode(element);
-      //Create Timestamp
-      //Testing
-      print(eventAsMap);
-      listOfEvents.add(_Event(tracker: tracker, action: eventAsMap["e_a"], eventName: eventAsMap["e_n"], eventCategory:eventAsMap["e_c"] ));
+      listOfEvents.add(_Event(tracker: tracker, eventAction: eventAsMap["e_a"], action: eventAsMap["action_name"], eventName: eventAsMap["e_n"], eventCategory:eventAsMap["e_c"], eventValue: eventAsMap["e_v"], goalId: eventAsMap["idgoal"], revenue: eventAsMap["revenue"], date: DateTime.parse(eventAsMap["cdt"]).toUtc() ));
    });
    return listOfEvents;
   }
-
 
   void addEventsToQueue(List<_Event> events){
     _queue.addAll(events);
@@ -428,7 +449,8 @@ class _MatomoDispatcher {
 
   _MatomoDispatcher(this.baseUrl);
 
-  void send(_Event event) {
+  Future<int> send(_Event event) async {
+    int statusCode = 599;
     var headers = {
       if (!kIsWeb && event.tracker.userAgent != null)
         'User-Agent': event.tracker.userAgent!,
@@ -441,12 +463,15 @@ class _MatomoDispatcher {
       url = '$url$key=$value&';
     }
     event.tracker.log.fine(' -> $url');
-    http.post(Uri.parse(url), headers: headers).then((http.Response response) {
-      final int statusCode = response.statusCode;
-      event.tracker.log.fine(' <- $statusCode');
-      if (statusCode != 200) {}
-    }).catchError((e) {
+
+    try {
+      var response = await http.post(Uri.parse(url), headers: headers);
+      statusCode = response.statusCode;
+    } catch(e) {
       event.tracker.log.fine(' <- ${e.toString()}');
-    });
+    }
+
+    event.tracker.log.fine(' <- $statusCode');
+    return statusCode;
   }
 }
