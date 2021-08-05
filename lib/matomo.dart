@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:convert';
 import 'dart:math';
 import 'dart:ui';
 
@@ -97,6 +98,9 @@ class MatomoTracker {
 
   bool initialized = false;
   bool? _optout = false;
+
+  bool saveOnDevice = true;
+  String sharedPrefsPath = "savedEventsMatomo";
 
   SharedPreferences? _prefs;
 
@@ -268,12 +272,31 @@ class MatomoTracker {
   void _dequeue() {
     assert(initialized);
     log.finest('Processing queue ${_queue.length}');
+    saveQueueInSharedPrefs(_queue);
     while (_queue.length > 0) {
       var event = _queue.removeFirst();
       if (!_optout!) {
         _dispatcher.send(event);
       }
     }
+  }
+
+  List<_Event> getEventsFromSharedPrefs(){
+   List<String>? eventsAsString =  _prefs!.getStringList(this.sharedPrefsPath);
+   eventsAsString!.forEach((element) {
+     //Create Event from StringL
+     
+   });
+
+    return listOfEvents ?? [];
+  }
+
+  void saveQueueInSharedPrefs(Queue<_Event> queue){
+    List<String> events = [];
+    for (int i = 0; i < queue.length; i++){
+      events.add(json.encode(queue.elementAt(0).toMap()));
+    }
+    _prefs!.setStringList(this.sharedPrefsPath, events);
   }
 }
 
@@ -406,7 +429,10 @@ class _MatomoDispatcher {
     http.post(Uri.parse(url), headers: headers).then((http.Response response) {
       final int statusCode = response.statusCode;
       event.tracker.log.fine(' <- $statusCode');
-      if (statusCode != 200) {}
+      if (statusCode != 200) {
+        var tracker = MatomoTracker();
+        tracker._track(event);
+      }
     }).catchError((e) {
       event.tracker.log.fine(' <- ${e.toString()}');
     });

@@ -17,7 +17,7 @@ class MyApp extends StatelessWidget {
 
     MatomoTracker().initialize(
       siteId: 1,
-      url: 'https://analytics.example.com/piwik.php',
+      url: 'https://track.addisca.de/matomo.php',
     );
   }
   // This widget is the root of your application.
@@ -48,7 +48,7 @@ class _MyHomePageState extends State<MyHomePage> {
   int _counter = 0;
 
   void _incrementCounter() {
-    MatomoTracker.trackEvent('IncrementCounter', 'Click');
+    MatomoTracker.trackEvent('IncrementCounter', 'Click', widgetName: "Counter1");
     setState(() {
       _counter++;
     });
