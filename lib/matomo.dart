@@ -272,17 +272,13 @@ class MatomoTracker {
     _queue.add(event);
   }
 
-  void _dequeue() async  {
+  void _dequeue() {
     assert(initialized);
     log.finest('Processing queue ${_queue.length}');
-    saveQueueInSharedPrefs(_queue);
-
-    int errorCount = 0;
-    while (_queue.length > 0 && errorCount < 5) {
+    while (_queue.length > 0) {
+      var event = _queue.removeFirst();
       if (!_optout!) {
-        if (_dispatcher.send(_queue.first)){
-          _queue.removeFirst();
-        } else {errorCount++;}
+        _dispatcher.send(event);
       }
     }
   }
@@ -311,7 +307,7 @@ class MatomoTracker {
   void saveQueueInSharedPrefs(Queue<_Event> queue){
     List<String> events = [];
     for (int i = 0; i < queue.length; i++){
-      events.add(json.encode(queue.elementAt(0).toMap()));
+      events.add(json.encode(queue.elementAt(i).toMap()));
     }
     _prefs!.setStringList(this.sharedPrefsPath, events);
   }
@@ -346,18 +342,16 @@ class _Event {
 
   late DateTime _date;
 
-
   _Event(
-      {
-
-        required this.tracker,
+      {required this.tracker,
       this.action,
       this.eventCategory,
       this.eventAction,
       this.eventName,
       this.eventValue,
       this.goalId,
-      this.revenue, this.date}) {
+      this.revenue,
+      this.date}) {
     _date  = this.date ??  DateTime.now().toUtc();
   }
 
@@ -434,7 +428,7 @@ class _MatomoDispatcher {
 
   _MatomoDispatcher(this.baseUrl);
 
-  bool send(_Event event) {
+  void send(_Event event) {
     var headers = {
       if (!kIsWeb && event.tracker.userAgent != null)
         'User-Agent': event.tracker.userAgent!,
@@ -447,17 +441,12 @@ class _MatomoDispatcher {
       url = '$url$key=$value&';
     }
     event.tracker.log.fine(' -> $url');
-    bool returnValue = false;
     http.post(Uri.parse(url), headers: headers).then((http.Response response) {
       final int statusCode = response.statusCode;
       event.tracker.log.fine(' <- $statusCode');
-      if (statusCode == 200) {
-        returnValue =  true;
-      }
+      if (statusCode != 200) {}
     }).catchError((e) {
       event.tracker.log.fine(' <- ${e.toString()}');
-      return false;
     });
-    return returnValue;
   }
 }
