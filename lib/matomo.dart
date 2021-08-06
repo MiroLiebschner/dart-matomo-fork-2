@@ -1,18 +1,19 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:convert';
 import 'dart:math';
 import 'dart:ui';
 
+import 'package:fk_user_agent/fk_user_agent.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:fk_user_agent/fk_user_agent.dart';
 import 'package:http/http.dart' as http;
 import 'package:logging/logging.dart';
 import 'package:matomo/random_alpha_numeric.dart';
 import 'package:package_info/package_info.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:uuid/uuid.dart';
 import 'package:universal_html/html.dart' as html;
+import 'package:uuid/uuid.dart';
 
 abstract class TraceableStatelessWidget extends StatelessWidget {
   final String name;
@@ -98,6 +99,11 @@ class MatomoTracker {
   bool initialized = false;
   bool? _optout = false;
 
+  bool saveOnDevice = true;
+  bool queueIsRunning = false;
+  int maxSimultaneousRequests = 5;
+  String sharedPrefsPath = "savedEventsMatomo";
+
   SharedPreferences? _prefs;
 
   Queue<_Event> _queue = Queue();
@@ -108,8 +114,10 @@ class MatomoTracker {
     required String url,
     String? visitorId,
     String? contentBaseUrl,
-    int dequeueInterval = 10
+    int dequeueInterval = 5,
+    int? maxSimultaneousRequests
   }) async {
+    this.maxSimultaneousRequests = maxSimultaneousRequests ?? this.maxSimultaneousRequests;
     this.siteId = siteId;
     this.url = url;
 
@@ -190,8 +198,13 @@ class MatomoTracker {
         'Matomo Initialized: firstVisit=$firstVisit; lastVisit=$lastVisit; visitCount=$visitCount; visitorId=$visitorId; contentBase=$contentBase; resolution=${width}x$height; userAgent=$userAgent');
     this.initialized = true;
 
+    List<_Event> savedEvents = getEventsFromSharedPrefs();
+    if (savedEvents.length > 0){addEventsToQueue(savedEvents);}
+
     _timer = Timer.periodic(Duration(seconds: dequeueInterval), (timer) {
-      this._dequeue();
+      if (!queueIsRunning) {
+        this._dequeue();
+      }
     });
   }
 
@@ -265,15 +278,59 @@ class MatomoTracker {
     _queue.add(event);
   }
 
-  void _dequeue() {
-    assert(initialized);
-    log.finest('Processing queue ${_queue.length}');
-    while (_queue.length > 0) {
-      var event = _queue.removeFirst();
-      if (!_optout!) {
-        _dispatcher.send(event);
+  Future<bool> _dequeueOne(event) async {
+    var httpStatus = await _dispatcher.send(event);
+    if (httpStatus == 200) {
+      _queue.remove(event);
+      return true;
+    }
+    return false;
+  }
+
+  void _dequeue() async {
+    queueIsRunning = true;
+    List<_Event> eventQueue = [];
+    List<Future<bool>> dequeueQueue = [];
+
+    if (_queue.length > 0) {
+      for (var i = 0; i < maxSimultaneousRequests && i < _queue.length; i++) {
+        var event = _queue.elementAt(i);
+        eventQueue.add(event);
+      }
+      eventQueue.forEach((currentEvent) {
+        dequeueQueue.add(_dequeueOne(currentEvent));
+      });
+      List<bool> success = await Future.wait(dequeueQueue);
+
+      if (!success.contains(false) && _queue.length > 0) {
+        _dequeue();
       }
     }
+    saveQueueInSharedPrefs(_queue);
+    queueIsRunning = false;
+  }
+
+  List<_Event> getEventsFromSharedPrefs(){
+   List<String>? eventsAsString = _prefs!.getStringList(this.sharedPrefsPath) ?? [];
+   var tracker = this;
+   List<_Event> listOfEvents = [];
+   eventsAsString.forEach((element) {
+      Map<String,dynamic> eventAsMap = json.decode(element);
+      listOfEvents.add(_Event(tracker: tracker, eventAction: eventAsMap["e_a"], action: eventAsMap["action_name"], eventName: eventAsMap["e_n"], eventCategory:eventAsMap["e_c"], eventValue: eventAsMap["e_v"], goalId: eventAsMap["idgoal"], revenue: eventAsMap["revenue"], date: DateTime.parse(eventAsMap["cdt"]).toUtc() ));
+   });
+   return listOfEvents;
+  }
+
+  void addEventsToQueue(List<_Event> events){
+    _queue.addAll(events);
+  }
+
+  void saveQueueInSharedPrefs(Queue<_Event> queue){
+    List<String> events = [];
+    for (int i = 0; i < queue.length; i++){
+      events.add(json.encode(queue.elementAt(i).toMap()));
+    }
+    _prefs!.setStringList(this.sharedPrefsPath, events);
   }
 }
 
@@ -302,6 +359,7 @@ class _Event {
   final int? eventValue;
   final int? goalId;
   final double? revenue;
+  final DateTime? date;
 
   late DateTime _date;
 
@@ -313,8 +371,9 @@ class _Event {
       this.eventName,
       this.eventValue,
       this.goalId,
-      this.revenue}) {
-    _date = DateTime.now().toUtc();
+      this.revenue,
+      this.date}) {
+    _date  = this.date ??  DateTime.now().toUtc();
   }
 
   Map<String, dynamic> toMap() {
@@ -390,7 +449,8 @@ class _MatomoDispatcher {
 
   _MatomoDispatcher(this.baseUrl);
 
-  void send(_Event event) {
+  Future<int> send(_Event event) async {
+    int statusCode = 599;
     var headers = {
       if (!kIsWeb && event.tracker.userAgent != null)
         'User-Agent': event.tracker.userAgent!,
@@ -403,12 +463,15 @@ class _MatomoDispatcher {
       url = '$url$key=$value&';
     }
     event.tracker.log.fine(' -> $url');
-    http.post(Uri.parse(url), headers: headers).then((http.Response response) {
-      final int statusCode = response.statusCode;
-      event.tracker.log.fine(' <- $statusCode');
-      if (statusCode != 200) {}
-    }).catchError((e) {
+
+    try {
+      var response = await http.post(Uri.parse(url), headers: headers);
+      statusCode = response.statusCode;
+    } catch(e) {
       event.tracker.log.fine(' <- ${e.toString()}');
-    });
+    }
+
+    event.tracker.log.fine(' <- $statusCode');
+    return statusCode;
   }
 }
