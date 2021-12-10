@@ -326,7 +326,7 @@ class MatomoTracker {
    var tracker = this;
    List<_Event> listOfEvents = [];
    if (eventsAsString.length > this.maxPersistentQueueLength) {
-     eventsAsString.removeRange(0, listOfEvents.length - this.maxPersistentQueueLength);
+     eventsAsString.removeRange(0, eventsAsString.length - this.maxPersistentQueueLength);
    }
    eventsAsString.forEach((element) {
       Map<String,dynamic> eventAsMap = json.decode(element);
