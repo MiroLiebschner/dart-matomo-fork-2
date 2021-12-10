@@ -103,6 +103,7 @@ class MatomoTracker {
   bool queueIsRunning = false;
   int maxSimultaneousRequests = 5;
   String sharedPrefsPath = "savedEventsMatomo";
+  int maxPersistentQueueLength = 100;
 
   SharedPreferences? _prefs;
 
@@ -115,9 +116,11 @@ class MatomoTracker {
     String? visitorId,
     String? contentBaseUrl,
     int dequeueInterval = 5,
-    int? maxSimultaneousRequests
+    int? maxSimultaneousRequests,
+    int? maxPersistentQueueLength
   }) async {
     this.maxSimultaneousRequests = maxSimultaneousRequests ?? this.maxSimultaneousRequests;
+    this.maxPersistentQueueLength = maxPersistentQueueLength ?? this.maxPersistentQueueLength;
     this.siteId = siteId;
     this.url = url;
 
@@ -311,9 +314,12 @@ class MatomoTracker {
   }
 
   List<_Event> getEventsFromSharedPrefs(){
-   List<String>? eventsAsString = _prefs!.getStringList(this.sharedPrefsPath) ?? [];
+   List<String> eventsAsString = _prefs!.getStringList(this.sharedPrefsPath) ?? [];
    var tracker = this;
    List<_Event> listOfEvents = [];
+   if (eventsAsString.length > this.maxPersistentQueueLength) {
+     eventsAsString.removeRange(0, listOfEvents.length - this.maxPersistentQueueLength);
+   }
    eventsAsString.forEach((element) {
       Map<String,dynamic> eventAsMap = json.decode(element);
       listOfEvents.add(_Event(tracker: tracker, eventAction: eventAsMap["e_a"], action: eventAsMap["action_name"], eventName: eventAsMap["e_n"], eventCategory:eventAsMap["e_c"], eventValue: eventAsMap["e_v"], goalId: eventAsMap["idgoal"], revenue: eventAsMap["revenue"], date: DateTime.parse(eventAsMap["cdt"]).toUtc() ));
@@ -328,6 +334,7 @@ class MatomoTracker {
   void saveQueueInSharedPrefs(Queue<_Event> queue){
     List<String> events = [];
     for (int i = 0; i < queue.length; i++){
+      if (i > this.maxPersistentQueueLength) break;
       events.add(json.encode(queue.elementAt(i).toMap()));
     }
     _prefs!.setStringList(this.sharedPrefsPath, events);
