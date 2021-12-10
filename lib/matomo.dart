@@ -104,6 +104,7 @@ class MatomoTracker {
   int maxSimultaneousRequests = 5;
   String sharedPrefsPath = "savedEventsMatomo";
   int maxPersistentQueueLength = 100;
+  int? maxLiveQueueLength;
 
   SharedPreferences? _prefs;
 
@@ -117,10 +118,12 @@ class MatomoTracker {
     String? contentBaseUrl,
     int dequeueInterval = 5,
     int? maxSimultaneousRequests,
-    int? maxPersistentQueueLength
+    int? maxPersistentQueueLength,
+    int? maxLiveQueueLength,
   }) async {
     this.maxSimultaneousRequests = maxSimultaneousRequests ?? this.maxSimultaneousRequests;
     this.maxPersistentQueueLength = maxPersistentQueueLength ?? this.maxPersistentQueueLength;
+    this.maxLiveQueueLength = maxLiveQueueLength ?? this.maxLiveQueueLength;
     this.siteId = siteId;
     this.url = url;
 
@@ -278,6 +281,9 @@ class MatomoTracker {
   }
 
   void _track(_Event event) {
+    if(this.maxLiveQueueLength != null && _queue.length > this.maxLiveQueueLength!) {
+      _queue.removeFirst();
+    }
     _queue.add(event);
   }
 
@@ -291,6 +297,7 @@ class MatomoTracker {
   }
 
   void _dequeue() async {
+    if(queueIsRunning) return;
     queueIsRunning = true;
     List<_Event> eventQueue = [];
     List<Future<bool>> dequeueQueue = [];
@@ -306,7 +313,8 @@ class MatomoTracker {
       List<bool> success = await Future.wait(dequeueQueue);
 
       if (!success.contains(false) && _queue.length > 0) {
-        _dequeue();
+        queueIsRunning = false;
+        return _dequeue();
       }
     }
     saveQueueInSharedPrefs(_queue);
@@ -333,8 +341,7 @@ class MatomoTracker {
 
   void saveQueueInSharedPrefs(Queue<_Event> queue){
     List<String> events = [];
-    for (int i = 0; i < queue.length; i++){
-      if (i > this.maxPersistentQueueLength) break;
+    for (int i = 0; i < min(queue.length, this.maxPersistentQueueLength); i++){
       events.add(json.encode(queue.elementAt(i).toMap()));
     }
     _prefs!.setStringList(this.sharedPrefsPath, events);
